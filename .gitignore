@@ -1,0 +1,7 @@
+data/
+outputs/
+*.pt
+*.ckpt
+__pycache__/
+.venv/
+wandb/
