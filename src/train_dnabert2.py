@@ -6,11 +6,13 @@ Run from project root:
 
 from __future__ import annotations
 
-import os
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
 import argparse
+import os
 from pathlib import Path
+
+# Silence the fork-after-tokenizer warning and disable HF download chatter
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
 
 import numpy as np
 import torch
@@ -57,14 +59,59 @@ def find_lora_targets(model) -> list[str]:
     )
 
 
+def _patch_dnabert2_disable_triton() -> None:
+    """DNABERT-2's `flash_attn_triton.py` uses `tl.dot(q, k, trans_b=True)`, an
+    API that was removed in Triton 2.2+. Mac (no Triton) falls back to pytorch
+    attention automatically; Colab (Triton 3.x) tries to compile and fails.
+
+    The model already has a pytorch-attention fallback that activates whenever
+    the `from .flash_attn_triton import ...` line raises ImportError. We patch
+    the cached bert_layers.py to force that path."""
+    import glob
+    import sys
+
+    bases = [
+        os.path.expanduser("~/.cache/huggingface/modules"),
+        "/root/.cache/huggingface/modules",
+    ]
+    candidates: list[str] = []
+    for base in bases:
+        candidates.extend(glob.glob(
+            f"{base}/transformers_modules/zhihan1996/DNABERT-2-117M/**/bert_layers.py",
+            recursive=True,
+        ))
+
+    OLD = "from .flash_attn_triton import flash_attn_qkvpacked_func"
+    NEW = "raise ImportError('Triton flash-attn disabled (DNABERT-2 uses removed trans_b API)')"
+
+    for p in candidates:
+        with open(p) as f:
+            text = f.read()
+        if NEW in text:
+            continue  # already patched
+        if OLD in text:
+            with open(p, "w") as f:
+                f.write(text.replace(OLD, NEW))
+            print(f"[patch] disabled Triton flash-attn in {p}")
+
+    # Drop any cached import so the next get_class_from_dynamic_module re-reads from disk
+    for name in list(sys.modules):
+        if "DNABERT-2-117M" in name:
+            del sys.modules[name]
+
+
 def load_dnabert2_classifier(num_labels: int = 2):
     """Load DNABERT-2 with a sequence-classification head using the *custom*
     `bert_layers.BertForSequenceClassification` defined in the model's remote
     code. The model's `auto_map` in config.json doesn't expose this class to
     `AutoModelForSequenceClassification`, so we load it directly."""
+    # AutoConfig.from_pretrained triggers the download of all auto_map'd .py
+    # files (configuration_bert.py, bert_layers.py, flash_attn_triton.py,
+    # bert_padding.py). After they land on disk we patch and *then* load.
     config = AutoConfig.from_pretrained(
         MODEL_NAME, num_labels=num_labels, trust_remote_code=True
     )
+    _patch_dnabert2_disable_triton()
     cls = get_class_from_dynamic_module(
         "bert_layers.BertForSequenceClassification",
         pretrained_model_name_or_path=MODEL_NAME,
@@ -157,7 +204,9 @@ def main():
         report_to="none",
         seed=args.seed,
         save_total_limit=2,
-        dataloader_num_workers=2,
+        # MPS doesn't support multi-worker dataloading cleanly; CUDA is fine with >0
+        dataloader_num_workers=0 if not torch.cuda.is_available() else 2,
+        dataloader_pin_memory=torch.cuda.is_available(),
     )
 
     trainer = Trainer(
