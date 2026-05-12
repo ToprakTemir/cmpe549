@@ -6,6 +6,9 @@ Run from project root:
 
 from __future__ import annotations
 
+import os
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import argparse
 from pathlib import Path
 
@@ -14,13 +17,14 @@ import torch
 from peft import LoraConfig, TaskType, get_peft_model
 from sklearn.metrics import accuracy_score, f1_score, matthews_corrcoef
 from transformers import (
-    AutoModelForSequenceClassification,
+    AutoConfig,
     AutoTokenizer,
     DataCollatorWithPadding,
     Trainer,
     TrainingArguments,
     set_seed,
 )
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from src.data import load_gue_subset, tokenize_dataset
 
@@ -29,7 +33,7 @@ MODEL_NAME = "zhihan1996/DNABERT-2-117M"
 
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
-    if isinstance(logits, tuple):  # some models return (logits, hidden_states, ...)
+    if isinstance(logits, tuple):
         logits = logits[0]
     preds = np.argmax(logits, axis=-1)
     return {
@@ -44,7 +48,6 @@ def find_lora_targets(model) -> list[str]:
     Standard BERT uses separate `query`/`key`/`value`. Try fused first."""
     leaf_names = {n.split(".")[-1] for n, _ in model.named_modules()}
     if "Wqkv" in leaf_names:
-        # Fused QKV; also adapt the FFN output projection ("dense" inside BertOutput).
         return ["Wqkv", "dense"]
     if {"query", "value"} <= leaf_names:
         return ["query", "value"]
@@ -54,14 +57,28 @@ def find_lora_targets(model) -> list[str]:
     )
 
 
+def load_dnabert2_classifier(num_labels: int = 2):
+    """Load DNABERT-2 with a sequence-classification head using the *custom*
+    `bert_layers.BertForSequenceClassification` defined in the model's remote
+    code. The model's `auto_map` in config.json doesn't expose this class to
+    `AutoModelForSequenceClassification`, so we load it directly."""
+    config = AutoConfig.from_pretrained(
+        MODEL_NAME, num_labels=num_labels, trust_remote_code=True
+    )
+    cls = get_class_from_dynamic_module(
+        "bert_layers.BertForSequenceClassification",
+        pretrained_model_name_or_path=MODEL_NAME,
+    )
+    return cls.from_pretrained(MODEL_NAME, config=config, trust_remote_code=True)
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--subset", default="human_tf_0",
                    help="GUE subset name, e.g. human_tf_0 ... human_tf_4, mouse_0 ...")
     p.add_argument("--output_dir", default=None,
                    help="Defaults to outputs/dnabert2_lora_<subset>")
-    p.add_argument("--max_length", type=int, default=128,
-                   help="DNABERT-2 BPE compresses ~3-6x; 128 covers ~500 bp easily.")
+    p.add_argument("--max_length", type=int, default=128)
     p.add_argument("--lora_r", type=int, default=8)
     p.add_argument("--lora_alpha", type=int, default=16)
     p.add_argument("--lora_dropout", type=float, default=0.05)
@@ -88,7 +105,6 @@ def main():
     tokenized = tokenize_dataset(ds, tokenizer, max_length=args.max_length)
     print(f"[data] Splits: { {k: len(v) for k, v in tokenized.items()} }")
 
-    # GUE on HF may name its eval split either 'validation' or 'dev'.
     eval_split = "validation" if "validation" in tokenized else "dev"
     test_split = "test" if "test" in tokenized else None
 
@@ -101,9 +117,7 @@ def main():
 
     # ---- Base model
     print("[model] Loading DNABERT-2 base + classification head")
-    model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_NAME, num_labels=2, trust_remote_code=True
-    )
+    model = load_dnabert2_classifier(num_labels=2)
 
     # ---- LoRA wrap
     target_modules = find_lora_targets(model)
