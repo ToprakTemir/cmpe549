@@ -61,7 +61,10 @@ class HyenaDNAForSequenceClassification(nn.Module):
         self.classifier = nn.Linear(hidden, num_labels)
 
     def forward(self, input_ids, attention_mask=None, labels=None, **_):
-        outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
+        # HyenaDNA uses long convolutions, not attention, so its forward()
+        # doesn't accept attention_mask. We still use the mask for mask-aware
+        # pooling on the output below.
+        outputs = self.backbone(input_ids=input_ids)
         hidden = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
 
         # Mask-aware mean pool (HyenaDNA outputs per-token hidden states)
