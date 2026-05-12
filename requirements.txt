@@ -1,7 +1,4 @@
-# Phase 1: DNABERT-2 fine-tuning with LoRA on GUE TFBS
-# torch is intentionally unpinned — Colab provides a working CUDA build; locally
-# install whichever wheel matches your CUDA / CPU.
-
+# Phase 1-3: DNABERT-2 / HyenaDNA fine-tuning + Integrated Gradients
 torch>=2.1
 transformers==4.41.2
 tokenizers>=0.19,<0.20
@@ -13,6 +10,10 @@ huggingface_hub>=0.20,<0.24
 evaluate>=0.4
 scikit-learn>=1.3
 
-einops>=0.7         # required by DNABERT-2 custom modeling code
-#triton>=2.0         # used by DNABERT-2 attention; harmless if unused on CPU
+# Phase 3: Integrated Gradients
+captum>=0.7
+tqdm>=4.66
+
+einops>=0.7         # required by DNABERT-2 + HyenaDNA custom modeling code
+triton>=2.0         # used by DNABERT-2 attention (we disable via runtime patch)
 numpy<2.0           # transformers 4.41 isn't fully NumPy-2 compatible
