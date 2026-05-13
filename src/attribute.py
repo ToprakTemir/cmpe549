@@ -71,6 +71,16 @@ def load_model_and_tokenizer(kind: str, adapter_path: str, device: torch.device)
     """Return (model in eval mode on device, tokenizer, max_length)."""
     if kind == "dnabert2":
         config = AutoConfig.from_pretrained(DNABERT2_NAME, num_labels=2, trust_remote_code=True)
+        # AutoConfig only downloads configuration_bert.py. We need bert_layers.py
+        # and flash_attn_triton.py on disk before the patcher can edit them, so we
+        # call get_class_from_dynamic_module once to trigger the download. The
+        # class itself imports fine (the trans_b bug fires only at Triton kernel
+        # compilation, not at module import), but we discard this class and
+        # re-import after patching.
+        get_class_from_dynamic_module(
+            "bert_layers.BertForSequenceClassification",
+            pretrained_model_name_or_path=DNABERT2_NAME,
+        )
         _patch_dnabert2_disable_triton()
         cls = get_class_from_dynamic_module(
             "bert_layers.BertForSequenceClassification",

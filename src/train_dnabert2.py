@@ -84,15 +84,29 @@ def _patch_dnabert2_disable_triton() -> None:
     OLD = "from .flash_attn_triton import flash_attn_qkvpacked_func"
     NEW = "raise ImportError('Triton flash-attn disabled (DNABERT-2 uses removed trans_b API)')"
 
+    if not candidates:
+        print("[patch] WARNING: no bert_layers.py found under transformers_modules/. "
+              "The patch is a no-op — bert_layers.py probably hasn't been downloaded yet. "
+              "Call get_class_from_dynamic_module(...) once to trigger the download, "
+              "then re-run this patcher.")
+        return
+
+    patched_any = False
     for p in candidates:
         with open(p) as f:
             text = f.read()
         if NEW in text:
+            patched_any = True
             continue  # already patched
         if OLD in text:
             with open(p, "w") as f:
                 f.write(text.replace(OLD, NEW))
             print(f"[patch] disabled Triton flash-attn in {p}")
+            patched_any = True
+
+    if not patched_any:
+        print(f"[patch] WARNING: found {len(candidates)} bert_layers.py file(s) but "
+              f"none contained the expected import line. Triton patch did not apply.")
 
     # Drop any cached import so the next get_class_from_dynamic_module re-reads from disk
     for name in list(sys.modules):
@@ -105,11 +119,17 @@ def load_dnabert2_classifier(num_labels: int = 2):
     `bert_layers.BertForSequenceClassification` defined in the model's remote
     code. The model's `auto_map` in config.json doesn't expose this class to
     `AutoModelForSequenceClassification`, so we load it directly."""
-    # AutoConfig.from_pretrained triggers the download of all auto_map'd .py
-    # files (configuration_bert.py, bert_layers.py, flash_attn_triton.py,
-    # bert_padding.py). After they land on disk we patch and *then* load.
+    # AutoConfig only downloads configuration_bert.py on current HF Hub versions.
+    # bert_layers.py + flash_attn_triton.py don't land on disk until the first
+    # call to get_class_from_dynamic_module, so we call it once to trigger the
+    # download, then patch the now-on-disk file, then re-import the patched
+    # module via a second call.
     config = AutoConfig.from_pretrained(
         MODEL_NAME, num_labels=num_labels, trust_remote_code=True
+    )
+    get_class_from_dynamic_module(
+        "bert_layers.BertForSequenceClassification",
+        pretrained_model_name_or_path=MODEL_NAME,
     )
     _patch_dnabert2_disable_triton()
     cls = get_class_from_dynamic_module(
