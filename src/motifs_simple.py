@@ -35,28 +35,41 @@ def load_attributions(path: str):
     return one_hot, attributions, sequences
 
 
-def find_top_window_per_sequence(one_hot, attributions, window_size: int):
-    """For each sequence, locate the window of `window_size` consecutive
-    positions with the largest summed |attribution|. Return arrays of:
-        windows_oh   (N, W, 4)  one-hot of the extracted windows
-        peak_starts  (N,)       start index of each window in its sequence
-        window_score (N,)       summed |attribution| at the peak
-    Sequences too short to fit a window are skipped.
+def find_top_window_per_sequence(one_hot, attributions, window_size: int,
+                                 center_mode: str = "peak"):
+    """For each sequence, extract a window of `window_size` bases.
+
+    Two centering modes:
+      - "peak" (default): find the single position with the highest |attribution|
+        and center the window on it. Best when the model concentrates attribution
+        on one nucleotide (which is what IG often does — sparse attribution).
+      - "window_sum": find the contiguous window with the largest summed
+        |attribution|. Best when the model spreads attribution across the
+        motif evenly. Picks the window whose total signal is highest, but
+        can place the peak at the edges.
     """
     N, L, _ = one_hot.shape
     W = window_size
     if W > L:
         raise ValueError(f"window_size {W} > sequence length {L}")
+    half = W // 2
 
     # per-position |attribution| collapsed across the 4 channels
     pos_score = np.abs(attributions).sum(axis=-1)            # (N, L)
 
-    # rolling sum of width W via cumulative-sum trick
-    cumsum = np.concatenate([np.zeros((N, 1)), np.cumsum(pos_score, axis=1)], axis=1)
-    window_sums = cumsum[:, W:] - cumsum[:, :-W]              # (N, L - W + 1)
-
-    peak_starts = np.argmax(window_sums, axis=1)              # (N,)
-    peak_scores = window_sums[np.arange(N), peak_starts]      # (N,)
+    if center_mode == "peak":
+        # Single-position argmax, then center the window on it.
+        peak_pos = np.argmax(pos_score, axis=1)              # (N,)
+        peak_starts = np.clip(peak_pos - half, 0, L - W)
+        peak_scores = pos_score[np.arange(N), peak_pos]
+    elif center_mode == "window_sum":
+        # Rolling-sum argmax (original behavior).
+        cumsum = np.concatenate([np.zeros((N, 1)), np.cumsum(pos_score, axis=1)], axis=1)
+        window_sums = cumsum[:, W:] - cumsum[:, :-W]          # (N, L - W + 1)
+        peak_starts = np.argmax(window_sums, axis=1)
+        peak_scores = window_sums[np.arange(N), peak_starts]
+    else:
+        raise ValueError(f"Unknown center_mode: {center_mode!r}")
 
     windows_oh = np.stack([
         one_hot[i, peak_starts[i]:peak_starts[i] + W]
@@ -118,8 +131,14 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--attributions", required=True)
     p.add_argument("--output", required=True)
-    p.add_argument("--window_size", type=int, default=15,
-                   help="Width of the motif window to extract.")
+    p.add_argument("--window_size", type=int, default=21,
+                   help="Width of the motif window to extract. 21 gives ~10bp "
+                        "on either side of the peak, enough context for most TFBSs.")
+    p.add_argument("--center_mode", default="peak",
+                   choices=["peak", "window_sum"],
+                   help="'peak' (default): center window on the single-position "
+                        "|attribution| argmax. 'window_sum': pick window with "
+                        "max summed |attribution| (less centered on the peak).")
     p.add_argument("--n_clusters", type=int, default=3,
                    help="K-means clusters. Use 1 for a single consensus PPM.")
     p.add_argument("--min_cluster_size", type=int, default=10,
@@ -137,9 +156,10 @@ def main():
     print(f"[load] one_hot      = {one_hot.shape}  attributions = {attributions.shape}")
 
     windows_oh, peak_starts, peak_scores = find_top_window_per_sequence(
-        one_hot, attributions, args.window_size
+        one_hot, attributions, args.window_size, center_mode=args.center_mode
     )
-    print(f"[peaks] {len(windows_oh)} top windows of width {args.window_size} extracted")
+    print(f"[peaks] {len(windows_oh)} top windows of width {args.window_size} "
+          f"extracted ({args.center_mode} centering)")
     print(f"[peaks] mean peak |attr| = {peak_scores.mean():.4f}  "
           f"median peak start = {int(np.median(peak_starts))} / {one_hot.shape[1]}")
 
