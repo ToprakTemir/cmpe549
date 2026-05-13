@@ -158,7 +158,13 @@ def main():
     h5_path = output_dir / "modisco_results.h5"
     try:
         from modiscolite import io as modisco_io  # noqa: E501
-        modisco_io.save_hdf5(str(h5_path), pos_patterns, neg_patterns)
+        try:
+            # modisco-lite >= 2.2: window_size is required
+            modisco_io.save_hdf5(str(h5_path), pos_patterns, neg_patterns,
+                                 args.sliding_window_size)
+        except TypeError:
+            # older modisco-lite: 3-arg signature
+            modisco_io.save_hdf5(str(h5_path), pos_patterns, neg_patterns)
         print(f"[save] HDF5 -> {h5_path}")
     except Exception as e:
         print(f"[warn] HDF5 save failed ({e}); patterns still extracted in-memory")
