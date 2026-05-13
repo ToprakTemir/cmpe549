@@ -36,11 +36,19 @@ def load_attributions(path: str):
 def run_modisco(one_hot, attributions, sliding_window_size: int, flank_size: int,
                 target_seqlet_fdr: float = 0.2,
                 min_metacluster_size: int = 30,
-                max_seqlets_per_metacluster: int = 2000):
+                max_seqlets_per_metacluster: int = 2000,
+                final_min_cluster_size: int = 20,
+                min_num_to_trim_to: int = 30,
+                subcluster_perplexity: float = 50.0,
+                n_leiden_runs: int = 2):
     """Cluster high-attribution windows into pos/neg patterns."""
     print(f"[modisco] sequences = {one_hot.shape[0]}, length = {one_hot.shape[1]}")
     print(f"[modisco] window={sliding_window_size}  flank={flank_size}  "
-          f"fdr={target_seqlet_fdr}  min_metacluster_size={min_metacluster_size}")
+          f"fdr={target_seqlet_fdr}  min_metacluster_size={min_metacluster_size}  "
+          f"final_min_cluster_size={final_min_cluster_size}  "
+          f"min_num_to_trim_to={min_num_to_trim_to}  "
+          f"subcluster_perplexity={subcluster_perplexity}  "
+          f"n_leiden_runs={n_leiden_runs}")
     pos_patterns, neg_patterns = tfmodisco.TFMoDISco(
         hypothetical_contribs=attributions,
         one_hot=one_hot,
@@ -49,6 +57,10 @@ def run_modisco(one_hot, attributions, sliding_window_size: int, flank_size: int
         target_seqlet_fdr=target_seqlet_fdr,
         min_metacluster_size=min_metacluster_size,
         max_seqlets_per_metacluster=max_seqlets_per_metacluster,
+        final_min_cluster_size=final_min_cluster_size,
+        min_num_to_trim_to=min_num_to_trim_to,
+        subcluster_perplexity=subcluster_perplexity,
+        n_leiden_runs=n_leiden_runs,
         verbose=True,
     )
     n_pos = len(pos_patterns) if pos_patterns else 0
@@ -131,6 +143,17 @@ def parse_args():
                         "N<=300 with noisy IG.")
     p.add_argument("--min_metacluster_size", type=int, default=30,
                    help="Modisco default is 100; lowered for our N=300 regime.")
+    p.add_argument("--final_min_cluster_size", type=int, default=20,
+                   help="Min seqlets per final sub-cluster. Modisco default 20; "
+                        "drop to 8-10 when total seqlets <100.")
+    p.add_argument("--min_num_to_trim_to", type=int, default=30,
+                   help="Min seqlets needed to compute a trimmed pattern. "
+                        "Modisco default 30; drop to 8-10 with few seqlets.")
+    p.add_argument("--subcluster_perplexity", type=float, default=50.0,
+                   help="tSNE perplexity for sub-clustering. Modisco default 50 "
+                        "but tSNE needs N > 3*perplexity. With ~50 seqlets, use ~10-15.")
+    p.add_argument("--n_leiden_runs", type=int, default=2,
+                   help="More runs => more chance leiden finds a good partition.")
     p.add_argument("--top_k", type=int, default=10,
                    help="Number of top positive patterns to emit as logos + MEME entries")
     p.add_argument("--max_seqlets_per_metacluster", type=int, default=2000)
@@ -152,6 +175,10 @@ def main():
         target_seqlet_fdr=args.target_seqlet_fdr,
         min_metacluster_size=args.min_metacluster_size,
         max_seqlets_per_metacluster=args.max_seqlets_per_metacluster,
+        final_min_cluster_size=args.final_min_cluster_size,
+        min_num_to_trim_to=args.min_num_to_trim_to,
+        subcluster_perplexity=args.subcluster_perplexity,
+        n_leiden_runs=args.n_leiden_runs,
     )
 
     # Save HDF5 (best-effort; modisco-lite's save API varies across versions)
@@ -171,11 +198,12 @@ def main():
 
     if not pos_patterns:
         print("[motifs] No positive patterns found.")
-        print("[motifs] Things to try (in order):")
-        print("[motifs]   1. --target_seqlet_fdr 0.3        (looser significance)")
-        print("[motifs]   2. --min_metacluster_size 20      (allow smaller clusters)")
-        print("[motifs]   3. --sliding_window_size 21       (catch slightly wider motifs)")
-        print("[motifs]   4. re-run attribute.py with --n_steps 200 for cleaner IG")
+        print("[motifs] At N<=100 seqlets, the binding constraints are usually")
+        print("[motifs] the *sub-cluster* thresholds, not metacluster size. Try:")
+        print("[motifs]   --final_min_cluster_size 8 --min_num_to_trim_to 8 \\")
+        print("[motifs]     --subcluster_perplexity 15 --target_seqlet_fdr 0.3")
+        print("[motifs] If that still yields 0: try --n_leiden_runs 6")
+        print("[motifs] Last resort: re-run attribute.py with --n_steps 200")
         return
 
     motifs: list[tuple[str, np.ndarray]] = []
